@@ -1,59 +1,92 @@
 import socket
-import errno
+import struct
 import sys
 import threading
-import pickle
 
 
-HEADER_LENGTH = 10
-IP = socket.gethostname()
-PORT = 5000
+class EventHook(object):
 
-my_username = input("Login: ")
-client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-client_socket.connect((IP, PORT))
-client_socket.setblocking(False)
+    def __init__(self):
+        self.__handlers = []
+
+    def __iadd__(self, handler):
+        self.__handlers.append(handler)
+        return self
+
+    def __isub__(self, handler):
+        self.__handlers.remove(handler)
+        return self
+
+    def emit(self, *args, **keywargs):
+        for handler in self.__handlers:
+            handler(*args, **keywargs)
 
 
-def read_sockets():
-    # Отдельный процесс получения сообщений
-    while True:
-        try:
-            # Независимо, ввели мы сообщение или нет, мы пытаемся получить сообщения от сервера
-            username_header = client_socket.recv(HEADER_LENGTH)
-            if not len(username_header):
-                print('Соединение закрыто сервером')
+class Message:
+    TYPE = 1
+
+    def __init__(self, text: str):
+        self.text = text
+
+    def serialize(self):
+        return self.text.encode('utf-8')
+
+    @staticmethod
+    def deserialize(payload):
+        return Message(payload.decode('utf-8'))
+
+
+class Socket:
+    sock = None
+    def __init__(self):
+        self.port = 5000
+        self.header_length = 10
+        self.ip = socket.gethostname()
+        self.onMessage = EventHook()
+
+        client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        client_socket.connect((self.ip, self.port))
+        client_socket.setblocking(False)
+        self.sock = client_socket
+
+    def start(self):
+        self.listen_messages()
+
+    def listen_messages(self):
+        while True:
+            header = self.sock.recv(self.header_length)
+            if not len(header):
                 sys.exit()
+            t = 1
+            payload = b'123123'
+            if t == Message.TYPE:
+                msg = Message.deserialize(payload)
+                self.onMessage.emit(msg)
 
-            username_length = int(bytes.decode(username_header).strip())
-            username = client_socket.recv(username_length)
-
-            in_message_header = client_socket.recv(HEADER_LENGTH)
-            message_length = int(bytes.decode(in_message_header).strip())
-            in_message = client_socket.recv(message_length)
-
-            print(f'[{pickle.loads(username)}] > {pickle.loads(in_message)}')
-        except IOError as error:
-            if error.errno != errno.EAGAIN and error.errno != errno.EWOULDBLOCK:
-                print('Ошибка чтения', str(error))
-                sys.exit()
-            continue
-        except Exception as error:
-            print('Ошибка приложения', str(error))
-            sys.exit()
+    def send(self, package):
+        bytes = package.serialize()
+        self.sock.send(struct.pack('LBs', len(bytes), package.TYPE, bytes))
 
 
-my_username = pickle.dumps({"login": my_username})
-my_username_header = f'{len(my_username):<{HEADER_LENGTH}}'
-client_socket.send(bytes(f'{my_username_header}', 'utf-8') + my_username)
+class User:
+    def __init__(self, s: Socket):
+        s.onMessage += self.onMessage
+        self.s = s
 
-potok = threading.Thread(target=read_sockets)
-potok.start()
+    def onMessage(self, message: Message):
+        print('New msg: ' + message.text)
 
-# Пишем сообщение
-while True:
-    out_message = input()
-    if out_message:
-        out_message = pickle.dumps({"message": out_message, 'to': ['kolyan', 'mary']})
-        out_message_header = f'{len(out_message):<{HEADER_LENGTH}}'
-        client_socket.send(bytes(out_message_header, 'utf-8') + out_message)
+    def start(self):
+        msg = input()
+        s.send(Message(msg))
+        pass
+
+
+s = Socket()
+socket_thread = threading.Thread(target=s.start)
+user_thread = threading.Thread(target=User(s).start)
+user_thread.start()
+socket_thread.start()
+user_thread.join()
+socket_thread.join()
+
