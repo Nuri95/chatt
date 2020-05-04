@@ -3,135 +3,139 @@ import select
 import pickle
 
 
-IP = socket.gethostname()  # IP сервера
-PORT = 5000  # Порт
-HEADER_LENGTH = 10  # Размер заголовка в символах
-MESSAGE_BYTE = HEADER_LENGTH + 1024  # Сколько байт принимаем за раз
-CLIENTS = {}  # Активные кленты <SOCKET>: {headers, login} / {headers, message, ...}
+class CollectionClients:
+    clients = {}
 
+    def add_client(self, new_login):
+        self.clients[new_login] = {'socket': None}
 
-class Users:
-    def user_from_a_socket(self, client_socket):
-        """ По клиентскому сокету получаем логин"""
-        for user in CLIENTS:
-            if CLIENTS[user] == client_socket:
+    def get_clients(self, login=None):
+        if not login:
+            return self.clients
+        if login in self.clients:
+            return self.clients[login]
+        return False
+
+    def get_login_from_sockets(self, sockets):
+        for user in self.get_clients():
+            if self.get_clients(user)['socket'] == sockets:
                 return user
+        return False
+
+    def connected(self, login, client_socket):
+        self.clients[login]['socket'] = client_socket
+
+    def disconnected(self, login):
+        self.clients[login]['socket'] = None
 
 
-class MessagesProcessing(Users):
+class ConnectionsActive:
+    sockets_list = []
 
-    def _message_decode_params(self, message, params):
-        """ декодируем объект сообщения, достаем из него необходимый параметр """
-        return pickle.loads(message['data'])[params]
+    def add_connections(self, client_socket):
+        return self.sockets_list.append(client_socket)
 
-    def send_messages(self, message, notified_socket):
-        """
-        Отправка сообщения.
-        :param message: словарь, с сообщением
-        :param notified_socket: сокет пользователя, с которым работаем в даннй момент
-        :return: None
-        """
+    def get_connections(self):
+        return self.sockets_list
 
-        from_user_login = self.user_from_a_socket(notified_socket)
-        from_user_header = bytes(
-            f'{len(pickle.dumps({"login": from_user_login})):<{HEADER_LENGTH}}', 'utf-8'
-        )
-        from_user_data = pickle.dumps({"login": from_user_login})
+    def delete_connections(self, client_socket):
+        return self.sockets_list.remove(client_socket)
 
-        if self._message_decode_params(message, 'to'):
-            for user in self._message_decode_params(message, 'to'):
-                if user in CLIENTS:
-                    return CLIENTS[user].send(
-                    from_user_header + from_user_data + message['header'] + message['data'])
 
-        for user in CLIENTS:
-            if CLIENTS[user] != notified_socket:
-                return CLIENTS[user].send(
-                    from_user_header + from_user_data + message['header'] + message['data'])
+class StringParsing:
+    def __init__(self, data):
+        self.data = data
+
+    def bytes_decode(self):
+        return bytes.decode(self.data)
+
+    def bytes_encode(self):
+        return bytes(self.data, 'utf-8')
+
+    def object_decode(self):
+        return pickle.loads(self.data)
+
+    def object_encode(self):
+        return pickle.dumps(self.data)
+
+
+class MessageProcessing:
+    header_length = 10
+    message_byte = header_length + 1024
+
+    @staticmethod
+    def _message_length(message):
+        message = StringParsing(message)
+        if not len(message.bytes_decode()):
+            return False
+        return int(message.bytes_decode().strip())
 
     def receiving_messages(self, client_socket):
-        """
-        Читаем заголовок, получаем длинну сообщения
-        :param client_socket: Текущая сессия
-        :return: dict {header: bytes(Заголовок), data: bytes(Сообщение)}
-        """
-        message_header = client_socket.recv(HEADER_LENGTH)
-        if not len(bytes.decode(message_header)):
-            return False
-        message_length = int(bytes.decode(message_header).strip())  # Получаем длинну сообщения
-        return {'header': message_header, 'data': self.messages_processing(client_socket, message_length)}
-
-    def messages_processing(self, client_socket, message_length: int):
-        """
-        Принимаем сообщение частями, если оно больше, чем MESSAGE_BYTE
-        :param client_socket: Текущая сессия
-        :param message_length: Длинна сообщения
-        :return: bytes: Принятое сообщение
-        """
-        if message_length >= MESSAGE_BYTE:
-            # Если принимаемое сообщение больше чем положено
-            message_full = b''
-            bytes_cale = message_length
-            while bytes_cale >= MESSAGE_BYTE:
-                # Принимаем до тех пор, пока остаток не будет меньше нашего сообщения
-                message_full += client_socket.recv(MESSAGE_BYTE)
-                bytes_cale -= MESSAGE_BYTE
-            else:
-                message_full += client_socket.recv(bytes_cale)
-                return message_full
-        return client_socket.recv(message_length)
+        message_full = b''
+        header = self._message_length(client_socket.recv(self.header_length))
+        if header:
+            while header >= self.message_byte:
+                message_full += client_socket.recv(self.message_byte)
+                header -= self.message_byte
+            message_full += client_socket.recv(header)
+            return message_full
+        return False
 
 
-class ChatsBasic(MessagesProcessing, Users):
+class Server:
+    ip = socket.gethostname()
+    port = 5000
+    sockets_list = ConnectionsActive()
+    message = MessageProcessing()
+    client = CollectionClients()
     server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-
-    server_socket.bind((IP, PORT))
+    server_socket.bind((ip, port))
     server_socket.listen()
-    sockets_list = [server_socket]  # Подключенные сокеты
+    sockets_list.add_connections(server_socket)
 
-    def connected_user(self):
-        """
-        Подключаем нового клиена. Возращаем скет
-        :return: Сокет
-        """
-        client_socket, client_address = self.server_socket.accept()
-        client = self.receiving_messages(client_socket)
-        if not client:
+    def connected(self, client_socket):
+        if client_socket == self.server_socket:
+            client_socket, client_address = self.server_socket.accept()
+
+        data = self.message.receiving_messages(client_socket)
+        if data is False:
             return False
-        self.sockets_list.append(client_socket)
-        CLIENTS[self._message_decode_params(client, 'login')] = client_socket
 
-        print(f'Новое подключение. Клиент {client_address[0]}:{client_address[1]} '
-              f"Логин: {pickle.loads(client['data'])}")
-        return client_address, client_socket
+        print(StringParsing(data).object_decode())
 
-    def disconnected_user(self, client_socket):
-        self.sockets_list.remove(client_socket)
-        del CLIENTS[self.user_from_a_socket(client_socket)]
+        if not self.client.get_login_from_sockets(client_socket):
+            login = StringParsing(data).object_decode()['login']
+            if not self.client.get_clients(login):
+                self.client.add_client(login)
+            self.client.connected(login, client_socket)
+            self.sockets_list.add_connections(client_socket)
+            print('Клиент подключен', login)
+            return login
 
-    def processing(self):
-        print('Сервер запущен')
+
+class ManagingConnection(Server):
+    def __init__(self):
+        self.connection_active = self.sockets_list
+        self.exception_sockets = None
+
+    def route(self):
         while True:
-            read_sockets, _, exception_sockets = select.select(self.sockets_list, [], self.sockets_list)
-            # Опрашиваем активные сокеты, которым есть о чем с нами разговаривать
+            print('route start')
+            read_sockets, _, self.exception_sockets = select.select(
+                self.connection_active.get_connections(),
+                [],
+                self.connection_active.get_connections()
+            )
             for notified_socket in read_sockets:
-                if notified_socket == self.server_socket:
-                    # Принимаем новое подключение
-                    if self.connected_user() is False:
-                        continue
-                else:
-                    message = self.receiving_messages(notified_socket)
-                    if message is False:
-                        # Соединение закрыто
-                        print(f"Соединение закрыто {self.user_from_a_socket(notified_socket)}")
-                        self.disconnected_user(notified_socket)
-                        continue
-                    print(f"Принято новое сообщение от {self.user_from_a_socket(notified_socket)}: "
-                          f"{pickle.loads(message['data'])}")
-                    self.send_messages(message, notified_socket)
-            for notified_socket in exception_sockets:
-                self.disconnected_user(notified_socket)
+                if self.connected(notified_socket) is False:
+                    continue
+
+            for notified_socket in self.exception_sockets:
+                login = self.client.get_login_from_sockets(notified_socket)
+                self.connection_active.delete_connections(notified_socket)
+                self.client.disconnected(self.client.disconnected(login))
 
 
-ChatsBasic().processing()
+ManagingConnection().route()
+
