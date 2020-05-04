@@ -38,6 +38,7 @@ class Message:
 
 class Socket:
     sock = None
+
     def __init__(self):
         self.port = 5000
         self.header_length = 10
@@ -55,6 +56,7 @@ class Socket:
     def listen_messages(self):
         while True:
             header = self.sock.recv(self.header_length)
+            print(header)
             if not len(header):
                 sys.exit()
             t = 1
@@ -65,7 +67,7 @@ class Socket:
 
     def send(self, package):
         bytes = package.serialize()
-        self.sock.send(struct.pack('LBs', len(bytes), package.TYPE, bytes))
+        self.sock.send(struct.pack('LB', len(bytes), package.TYPE)+bytes)
 
 
 class User:
@@ -85,8 +87,8 @@ class User:
 s = Socket()
 socket_thread = threading.Thread(target=s.start)
 user_thread = threading.Thread(target=User(s).start)
-user_thread.start()
 socket_thread.start()
+user_thread.start()
 user_thread.join()
 socket_thread.join()
 
